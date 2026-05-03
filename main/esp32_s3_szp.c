@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include "esp32_s3_szp.h"
 
 static const char *TAG = "esp32_s3_szp";
@@ -8,6 +9,7 @@ static int i2c_port = BSP_I2C_NUM;
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static i2c_master_dev_handle_t qmi8658_i2c_handle = NULL;
 static i2c_master_dev_handle_t pca9557_i2c_handle = NULL;
+static i2c_master_dev_handle_t pn532_i2c_handle = NULL;
 
 static esp_err_t bsp_i2c_add_device(uint16_t dev_addr, i2c_master_dev_handle_t *ret_handle)
 {
@@ -207,9 +209,266 @@ uint8_t qmi8658_fetch_motion(void)
 
 /*******************************************************************************/
 /***************************  NFC PN532 ↓  **************************************/
+#define PN532_PREAMBLE          0x00
+#define PN532_STARTCODE1        0x00
+#define PN532_STARTCODE2        0xFF
+#define PN532_POSTAMBLE         0x00
+#define PN532_HOST_TO_PN532     0xD4
+#define PN532_PN532_TO_HOST     0xD5
+#define PN532_I2C_READY         0x01
+
+#define PN532_COMMAND_SAMCONFIGURATION      0x14
+#define PN532_COMMAND_RFCONFIGURATION       0x32
+#define PN532_COMMAND_INLISTPASSIVETARGET   0x4A
+
+#define PN532_I2C_READ_BUF_SIZE 48
+
+static bool pn532_sam_configured = false;
+static const uint8_t pn532_ack_frame[6] = {0x00, 0x00, 0xff, 0x00, 0xff, 0x00};
+
 esp_err_t pn532_i2c_probe(void)
 {
     return bsp_i2c_probe_device(PN532_I2C_ADDR);
+}
+
+static esp_err_t pn532_i2c_prepare(void)
+{
+    if (i2c_bus_handle == NULL) {
+        ESP_RETURN_ON_ERROR(bsp_i2c_init(), TAG, "I2C bus init failed before PN532");
+    }
+
+    ESP_RETURN_ON_ERROR(bsp_i2c_add_device(PN532_I2C_ADDR, &pn532_i2c_handle), TAG, "Failed to add PN532 I2C device");
+    return ESP_OK;
+}
+
+static esp_err_t pn532_i2c_read(uint8_t *data, size_t len, uint32_t timeout_ms)
+{
+    TickType_t start_tick = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+
+    if (timeout_ticks == 0) {
+        timeout_ticks = 1;
+    }
+
+    while ((xTaskGetTickCount() - start_tick) <= timeout_ticks) {
+        esp_err_t ret = i2c_master_receive(pn532_i2c_handle, data, len, 100);
+        if (ret == ESP_OK && data[0] == PN532_I2C_READY) {
+            return ESP_OK;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t pn532_i2c_write_frame(uint8_t command, const uint8_t *payload, size_t payload_len)
+{
+    uint8_t frame[32];
+    size_t idx = 0;
+    uint8_t data_len = payload_len + 2; // TFI + command + payload
+    uint8_t sum = 0;
+
+    if (payload_len > sizeof(frame) - 9) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    frame[idx++] = PN532_PREAMBLE;
+    frame[idx++] = PN532_STARTCODE1;
+    frame[idx++] = PN532_STARTCODE2;
+    frame[idx++] = data_len;
+    frame[idx++] = (uint8_t)(~data_len + 1);
+
+    frame[idx++] = PN532_HOST_TO_PN532;
+    sum += PN532_HOST_TO_PN532;
+
+    frame[idx++] = command;
+    sum += command;
+
+    for (size_t i = 0; i < payload_len; i++) {
+        frame[idx++] = payload[i];
+        sum += payload[i];
+    }
+
+    frame[idx++] = (uint8_t)(~sum + 1);
+    frame[idx++] = PN532_POSTAMBLE;
+
+    return i2c_master_transmit(pn532_i2c_handle, frame, idx, 1000);
+}
+
+static esp_err_t pn532_i2c_read_ack(uint32_t timeout_ms)
+{
+    uint8_t data[sizeof(pn532_ack_frame) + 1] = {0};
+
+    ESP_RETURN_ON_ERROR(pn532_i2c_read(data, sizeof(data), timeout_ms), TAG, "PN532 ACK timeout");
+
+    if (memcmp(&data[1], pn532_ack_frame, sizeof(pn532_ack_frame)) != 0) {
+        ESP_LOGE(TAG, "PN532 invalid ACK");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t pn532_i2c_send_ack(void)
+{
+    return i2c_master_transmit(pn532_i2c_handle, pn532_ack_frame, sizeof(pn532_ack_frame), 1000);
+}
+
+static esp_err_t pn532_i2c_read_response(uint8_t command, uint8_t *response, size_t response_size,
+                                         size_t *response_len, uint32_t timeout_ms)
+{
+    uint8_t data[PN532_I2C_READ_BUF_SIZE + 1] = {0};
+    uint8_t *frame = &data[1];
+    uint8_t frame_len = 0;
+    uint8_t sum = 0;
+
+    esp_err_t ret = pn532_i2c_read(data, sizeof(data), timeout_ms);
+    if (ret != ESP_OK) {
+        pn532_i2c_send_ack();
+        return ret;
+    }
+
+    if (frame[0] != PN532_PREAMBLE || frame[1] != PN532_STARTCODE1 || frame[2] != PN532_STARTCODE2) {
+        ESP_LOGE(TAG, "PN532 invalid response header");
+        return ESP_FAIL;
+    }
+
+    frame_len = frame[3];
+    if ((uint8_t)(frame_len + frame[4]) != 0) {
+        ESP_LOGE(TAG, "PN532 invalid response length checksum");
+        return ESP_FAIL;
+    }
+    if (frame_len < 2 || frame_len > PN532_I2C_READ_BUF_SIZE - 7) {
+        ESP_LOGE(TAG, "PN532 invalid response length: %d", frame_len);
+        return ESP_FAIL;
+    }
+
+    for (uint8_t i = 0; i < frame_len; i++) {
+        sum += frame[5 + i];
+    }
+    sum += frame[5 + frame_len];
+    if (sum != 0) {
+        ESP_LOGE(TAG, "PN532 invalid response data checksum");
+        return ESP_FAIL;
+    }
+
+    if (frame[5] != PN532_PN532_TO_HOST || frame[6] != (uint8_t)(command + 1)) {
+        ESP_LOGE(TAG, "PN532 unexpected response: tfi=0x%02X cmd=0x%02X", frame[5], frame[6]);
+        return ESP_FAIL;
+    }
+
+    size_t payload_len = frame_len - 2;
+    if (response != NULL && response_size > 0) {
+        size_t copy_len = payload_len;
+        if (copy_len > response_size) {
+            copy_len = response_size;
+        }
+        memcpy(response, &frame[7], copy_len);
+    }
+    if (response_len != NULL) {
+        *response_len = payload_len;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t pn532_i2c_command(uint8_t command, const uint8_t *payload, size_t payload_len,
+                                   uint8_t *response, size_t response_size, size_t *response_len,
+                                   uint32_t response_timeout_ms)
+{
+    ESP_RETURN_ON_ERROR(pn532_i2c_write_frame(command, payload, payload_len), TAG, "PN532 write frame failed");
+    ESP_RETURN_ON_ERROR(pn532_i2c_read_ack(1000), TAG, "PN532 ACK failed");
+
+    return pn532_i2c_read_response(command, response, response_size, response_len, response_timeout_ms);
+}
+
+static esp_err_t pn532_set_passive_activation_retries(uint8_t retries)
+{
+    const uint8_t payload[] = {
+        0x05, // MaxRetries
+        0xff, // MxRtyATR
+        0x01, // MxRtyPSL
+        retries, // MxRtyPassiveActivation
+    };
+
+    return pn532_i2c_command(PN532_COMMAND_RFCONFIGURATION, payload, sizeof(payload), NULL, 0, NULL, 1000);
+}
+
+esp_err_t pn532_i2c_init(void)
+{
+    if (pn532_sam_configured) {
+        return ESP_OK;
+    }
+
+    ESP_RETURN_ON_ERROR(pn532_i2c_prepare(), TAG, "PN532 I2C prepare failed");
+    ESP_RETURN_ON_ERROR(pn532_i2c_probe(), TAG, "PN532 probe failed");
+
+    const uint8_t sam_payload[] = {
+        0x01, // Normal mode
+        0x14, // Timeout = 50ms * 20
+        0x01, // Use IRQ
+    };
+
+    ESP_RETURN_ON_ERROR(pn532_i2c_command(PN532_COMMAND_SAMCONFIGURATION, sam_payload, sizeof(sam_payload),
+                                          NULL, 0, NULL, 1000), TAG, "PN532 SAMConfiguration failed");
+    ESP_RETURN_ON_ERROR(pn532_set_passive_activation_retries(0x00), TAG, "PN532 RFConfiguration failed");
+
+    pn532_sam_configured = true;
+    return ESP_OK;
+}
+
+esp_err_t pn532_read_passive_target(pn532_card_t *card, uint32_t timeout_ms)
+{
+    const uint8_t payload[] = {
+        0x01, // MaxTg
+        0x00, // 106 kbps type A
+    };
+    TickType_t start_tick = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+
+    if (card == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (timeout_ticks == 0) {
+        timeout_ticks = 1;
+    }
+
+    ESP_RETURN_ON_ERROR(pn532_i2c_init(), TAG, "PN532 init failed before read");
+    memset(card, 0, sizeof(*card));
+
+    while ((xTaskGetTickCount() - start_tick) <= timeout_ticks) {
+        uint8_t response[24] = {0};
+        size_t response_len = 0;
+        esp_err_t ret = pn532_i2c_command(PN532_COMMAND_INLISTPASSIVETARGET, payload, sizeof(payload),
+                                          response, sizeof(response), &response_len, 300);
+        if (ret == ESP_OK) {
+            if (response_len >= 1 && response[0] == 0x00) {
+                vTaskDelay(pdMS_TO_TICKS(120));
+                continue;
+            }
+            if (response_len < 6) {
+                return ESP_FAIL;
+            }
+
+            uint8_t uid_len = response[5];
+            if (uid_len == 0 || uid_len > PN532_UID_MAX_LEN || response_len < (size_t)(6 + uid_len)) {
+                return ESP_FAIL;
+            }
+
+            card->len = uid_len;
+            memcpy(card->data, &response[6], uid_len);
+            return ESP_OK;
+        }
+
+        if (ret != ESP_ERR_TIMEOUT) {
+            return ret;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+
+    return ESP_ERR_TIMEOUT;
 }
 /***************************  NFC PN532 ↑  **************************************/
 /*******************************************************************************/

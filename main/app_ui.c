@@ -3,11 +3,14 @@
 #include "esp32_s3_szp.h"
 #include "file_iterator.h"
 #include "string.h"
+#include <stdint.h>
+#include <stdio.h>
 #include <dirent.h>
 #include "bt/ble_hidd_demo.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
 #include "esp_event.h"
+#include "nvs.h"
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/time.h>
@@ -1781,6 +1784,35 @@ static void btset_event_handler(lv_event_t * e)
 static bool doorlock_locked = true;
 static lv_obj_t *doorlock_status_label;
 static lv_obj_t *doorlock_hint_label;
+static lv_obj_t *doorlock_nfc_panel;
+static lv_obj_t *doorlock_nfc_count_label;
+static lv_timer_t *doorlock_auto_lock_timer;
+static bool doorlock_nfc_busy;
+
+#define DOORLOCK_AUTO_LOCK_MS           8000
+#define DOORLOCK_NFC_MAX_CARDS          8
+#define DOORLOCK_NFC_WAIT_MS            5000
+#define DOORLOCK_NFC_STORE_MAGIC        0x4e464331
+#define DOORLOCK_NFC_STORE_VERSION      1
+#define DOORLOCK_NFC_NVS_NAMESPACE      "doorlock"
+#define DOORLOCK_NFC_NVS_KEY            "nfc_cards"
+
+typedef struct {
+    uint8_t len;
+    uint8_t data[PN532_UID_MAX_LEN];
+} doorlock_nfc_card_record_t;
+
+typedef struct {
+    uint32_t magic;
+    uint8_t version;
+    uint8_t count;
+    doorlock_nfc_card_record_t cards[DOORLOCK_NFC_MAX_CARDS];
+} doorlock_nfc_store_t;
+
+typedef enum {
+    DOORLOCK_NFC_ACTION_UNLOCK = 0,
+    DOORLOCK_NFC_ACTION_ENROLL,
+} doorlock_nfc_action_t;
 
 static void doorlock_update_status(void)
 {
@@ -1804,13 +1836,178 @@ static void doorlock_set_hint(const char *text)
     lv_label_set_text(doorlock_hint_label, text);
 }
 
+static void doorlock_auto_lock_cancel(void)
+{
+    if (doorlock_auto_lock_timer != NULL) {
+        lv_timer_del(doorlock_auto_lock_timer);
+        doorlock_auto_lock_timer = NULL;
+    }
+}
+
+static void doorlock_auto_lock_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+
+    doorlock_auto_lock_timer = NULL;
+    if (icon_flag != 7 || doorlock_status_label == NULL) {
+        return;
+    }
+
+    if (!doorlock_locked) {
+        doorlock_locked = true;
+        doorlock_update_status();
+        doorlock_set_hint("门锁已自动上锁");
+    }
+}
+
+static void doorlock_auto_lock_start(void)
+{
+    doorlock_auto_lock_cancel();
+
+    doorlock_auto_lock_timer = lv_timer_create(doorlock_auto_lock_timer_cb, DOORLOCK_AUTO_LOCK_MS, NULL);
+    if (doorlock_auto_lock_timer != NULL) {
+        lv_timer_set_repeat_count(doorlock_auto_lock_timer, 1);
+    }
+}
+
+static void doorlock_nfc_store_init_empty(doorlock_nfc_store_t *store)
+{
+    memset(store, 0, sizeof(*store));
+    store->magic = DOORLOCK_NFC_STORE_MAGIC;
+    store->version = DOORLOCK_NFC_STORE_VERSION;
+}
+
+static esp_err_t doorlock_nfc_store_load(doorlock_nfc_store_t *store)
+{
+    nvs_handle_t handle;
+    size_t required_size = sizeof(*store);
+    esp_err_t ret;
+
+    doorlock_nfc_store_init_empty(store);
+
+    ret = nvs_open(DOORLOCK_NFC_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = nvs_get_blob(handle, DOORLOCK_NFC_NVS_KEY, store, &required_size);
+    nvs_close(handle);
+
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        doorlock_nfc_store_init_empty(store);
+        return ESP_OK;
+    }
+    if (ret != ESP_OK) {
+        doorlock_nfc_store_init_empty(store);
+        return ret;
+    }
+    if (required_size != sizeof(*store) || store->magic != DOORLOCK_NFC_STORE_MAGIC ||
+        store->version != DOORLOCK_NFC_STORE_VERSION || store->count > DOORLOCK_NFC_MAX_CARDS) {
+        doorlock_nfc_store_init_empty(store);
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t doorlock_nfc_store_save(doorlock_nfc_store_t *store)
+{
+    nvs_handle_t handle;
+    esp_err_t ret;
+
+    store->magic = DOORLOCK_NFC_STORE_MAGIC;
+    store->version = DOORLOCK_NFC_STORE_VERSION;
+    if (store->count > DOORLOCK_NFC_MAX_CARDS) {
+        store->count = DOORLOCK_NFC_MAX_CARDS;
+    }
+
+    ret = nvs_open(DOORLOCK_NFC_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = nvs_set_blob(handle, DOORLOCK_NFC_NVS_KEY, store, sizeof(*store));
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    return ret;
+}
+
+static esp_err_t doorlock_nfc_store_clear(void)
+{
+    doorlock_nfc_store_t store;
+
+    doorlock_nfc_store_init_empty(&store);
+    return doorlock_nfc_store_save(&store);
+}
+
+static bool doorlock_nfc_card_record_equal(const doorlock_nfc_card_record_t *record, const pn532_card_t *card)
+{
+    return record->len == card->len && memcmp(record->data, card->data, card->len) == 0;
+}
+
+static int doorlock_nfc_find_card(const doorlock_nfc_store_t *store, const pn532_card_t *card)
+{
+    for (uint8_t i = 0; i < store->count; i++) {
+        if (doorlock_nfc_card_record_equal(&store->cards[i], card)) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void doorlock_nfc_format_uid(const pn532_card_t *card, char *buf, size_t buf_size)
+{
+    size_t pos = 0;
+
+    if (buf_size == 0) {
+        return;
+    }
+
+    buf[0] = '\0';
+    for (uint8_t i = 0; i < card->len && pos < buf_size; i++) {
+        int written = snprintf(&buf[pos], buf_size - pos, "%02X%s", card->data[i], i + 1 == card->len ? "" : ":");
+        if (written < 0) {
+            buf[0] = '\0';
+            return;
+        }
+        if ((size_t)written >= buf_size - pos) {
+            pos = buf_size - 1;
+        } else {
+            pos += written;
+        }
+    }
+}
+
+static void doorlock_nfc_update_count_label(void)
+{
+    doorlock_nfc_store_t store;
+    esp_err_t ret;
+
+    if (doorlock_nfc_count_label == NULL) {
+        return;
+    }
+
+    ret = doorlock_nfc_store_load(&store);
+    if (ret == ESP_OK) {
+        lv_label_set_text_fmt(doorlock_nfc_count_label, "已录入：%d/%d", store.count, DOORLOCK_NFC_MAX_CARDS);
+    } else {
+        lv_label_set_text_fmt(doorlock_nfc_count_label, "NVS：%s", esp_err_to_name(ret));
+    }
+}
+
 static void btn_doorlock_back_cb(lv_event_t * e)
 {
     (void)e;
+    doorlock_auto_lock_cancel();
     lv_obj_del(icon_in_obj);
     icon_in_obj = NULL;
     doorlock_status_label = NULL;
     doorlock_hint_label = NULL;
+    doorlock_nfc_panel = NULL;
+    doorlock_nfc_count_label = NULL;
     icon_flag = 0;
 }
 
@@ -1826,16 +2023,234 @@ static void doorlock_fingerprint_cb(lv_event_t * e)
     doorlock_set_hint("指纹解锁：菜单框架已创建，等待接入指纹模块驱动");
 }
 
+static void doorlock_nfc_task(void *arg)
+{
+    doorlock_nfc_action_t action = (doorlock_nfc_action_t)(intptr_t)arg;
+    doorlock_nfc_store_t store;
+    pn532_card_t card;
+    char uid_text[PN532_UID_MAX_LEN * 3] = {0};
+    char hint_text[160] = {0};
+    bool unlock_success = false;
+    esp_err_t ret;
+
+    ret = doorlock_nfc_store_load(&store);
+    if (ret != ESP_OK) {
+        snprintf(hint_text, sizeof(hint_text), "NFC：读取卡片库失败，%s", esp_err_to_name(ret));
+        goto done;
+    }
+
+    if (action == DOORLOCK_NFC_ACTION_UNLOCK && store.count == 0) {
+        snprintf(hint_text, sizeof(hint_text), "NFC解锁：请先录入卡片");
+        goto done;
+    }
+    if (action == DOORLOCK_NFC_ACTION_ENROLL && store.count >= DOORLOCK_NFC_MAX_CARDS) {
+        snprintf(hint_text, sizeof(hint_text), "NFC录入：卡片库已满（%d张）", DOORLOCK_NFC_MAX_CARDS);
+        goto done;
+    }
+
+    ret = pn532_i2c_init();
+    if (ret != ESP_OK) {
+        snprintf(hint_text, sizeof(hint_text), "NFC：PN532初始化失败，检查IO1(SDA)/IO2(SCL)，%s", esp_err_to_name(ret));
+        goto done;
+    }
+
+    ret = pn532_read_passive_target(&card, DOORLOCK_NFC_WAIT_MS);
+    if (ret == ESP_ERR_TIMEOUT) {
+        snprintf(hint_text, sizeof(hint_text), "NFC：%d秒内未读到卡片", DOORLOCK_NFC_WAIT_MS / 1000);
+        goto done;
+    }
+    if (ret != ESP_OK) {
+        snprintf(hint_text, sizeof(hint_text), "NFC：读卡失败，%s", esp_err_to_name(ret));
+        goto done;
+    }
+
+    doorlock_nfc_format_uid(&card, uid_text, sizeof(uid_text));
+    int card_index = doorlock_nfc_find_card(&store, &card);
+
+    if (action == DOORLOCK_NFC_ACTION_ENROLL) {
+        if (card_index >= 0) {
+            snprintf(hint_text, sizeof(hint_text), "NFC录入：卡片已存在 %s", uid_text);
+        } else {
+            doorlock_nfc_card_record_t *record = &store.cards[store.count++];
+
+            record->len = card.len;
+            memcpy(record->data, card.data, card.len);
+
+            ret = doorlock_nfc_store_save(&store);
+            if (ret == ESP_OK) {
+                snprintf(hint_text, sizeof(hint_text), "NFC录入成功：%s", uid_text);
+            } else {
+                snprintf(hint_text, sizeof(hint_text), "NFC录入失败：%s", esp_err_to_name(ret));
+            }
+        }
+    } else {
+        if (card_index >= 0) {
+            unlock_success = true;
+            snprintf(hint_text, sizeof(hint_text), "NFC解锁成功：%s，8秒后自动上锁", uid_text);
+        } else {
+            snprintf(hint_text, sizeof(hint_text), "NFC解锁失败：未授权卡片 %s", uid_text);
+        }
+    }
+
+done:
+    lvgl_port_lock(0);
+    doorlock_nfc_busy = false;
+    if (icon_flag == 7 && doorlock_hint_label != NULL) {
+        if (unlock_success) {
+            doorlock_locked = false;
+            doorlock_auto_lock_start();
+            doorlock_update_status();
+        }
+        doorlock_set_hint(hint_text);
+        doorlock_nfc_update_count_label();
+    }
+    lvgl_port_unlock();
+
+    vTaskDelete(NULL);
+}
+
+static void doorlock_nfc_start_action(doorlock_nfc_action_t action)
+{
+    BaseType_t task_ret;
+
+    if (doorlock_nfc_busy) {
+        doorlock_set_hint("NFC正在读卡，请稍等");
+        return;
+    }
+
+    doorlock_nfc_busy = true;
+    if (action == DOORLOCK_NFC_ACTION_ENROLL) {
+        doorlock_set_hint("NFC录入：请在5秒内将新卡片靠近PN532");
+    } else {
+        doorlock_set_hint("NFC解锁：请在5秒内刷已录入卡片");
+    }
+
+    task_ret = xTaskCreatePinnedToCore(doorlock_nfc_task, "doorlock_nfc_task", 4 * 1024,
+                                       (void *)(intptr_t)action, 5, NULL, 1);
+    if (task_ret != pdPASS) {
+        doorlock_nfc_busy = false;
+        doorlock_set_hint("NFC：读卡任务创建失败");
+    }
+}
+
+static void doorlock_nfc_unlock_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_nfc_start_action(DOORLOCK_NFC_ACTION_UNLOCK);
+}
+
+static void doorlock_nfc_enroll_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_nfc_start_action(DOORLOCK_NFC_ACTION_ENROLL);
+}
+
+static void doorlock_nfc_clear_cb(lv_event_t * e)
+{
+    (void)e;
+
+    if (doorlock_nfc_busy) {
+        doorlock_set_hint("NFC正在读卡，稍后再清空");
+        return;
+    }
+
+    esp_err_t ret = doorlock_nfc_store_clear();
+    if (ret == ESP_OK) {
+        doorlock_set_hint("NFC：已清空所有录入卡片");
+    } else if (doorlock_hint_label != NULL) {
+        lv_label_set_text_fmt(doorlock_hint_label, "NFC清空失败：%s", esp_err_to_name(ret));
+    }
+    doorlock_nfc_update_count_label();
+}
+
+static void doorlock_nfc_close_cb(lv_event_t * e)
+{
+    (void)e;
+
+    if (doorlock_nfc_panel != NULL) {
+        lv_obj_del(doorlock_nfc_panel);
+        doorlock_nfc_panel = NULL;
+        doorlock_nfc_count_label = NULL;
+    }
+    doorlock_set_hint("请选择解锁方式");
+}
+
+static lv_obj_t *doorlock_create_nfc_action_btn(lv_obj_t * parent, const char *symbol, const char *text,
+                                                lv_coord_t x, lv_coord_t y, lv_color_t color, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 135, 32);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, color, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *icon = lv_label_create(btn);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xffffff), 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_width(label, 88);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 38, 0);
+
+    return btn;
+}
+
 static void doorlock_nfc_cb(lv_event_t * e)
 {
     (void)e;
 
-    esp_err_t ret = pn532_i2c_probe();
-    if (ret == ESP_OK) {
-        doorlock_set_hint("NFC解锁：PN532已响应，I2C SDA=IO1 SCL=IO2");
-    } else {
-        lv_label_set_text_fmt(doorlock_hint_label, "NFC解锁：未检测到PN532，I2C地址0x%02X，%s", PN532_I2C_ADDR, esp_err_to_name(ret));
+    if (doorlock_nfc_panel != NULL) {
+        lv_obj_move_foreground(doorlock_nfc_panel);
+        doorlock_set_hint("NFC管理：选择刷卡解锁或录入卡片");
+        doorlock_nfc_update_count_label();
+        return;
     }
+
+    doorlock_set_hint("NFC管理：选择刷卡解锁或录入卡片");
+
+    doorlock_nfc_panel = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(doorlock_nfc_panel, 300, 126);
+    lv_obj_align(doorlock_nfc_panel, LV_ALIGN_TOP_MID, 0, 108);
+    lv_obj_clear_flag(doorlock_nfc_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(doorlock_nfc_panel, 8, 0);
+    lv_obj_set_style_pad_all(doorlock_nfc_panel, 0, 0);
+    lv_obj_set_style_bg_color(doorlock_nfc_panel, lv_color_hex(0xf5f7fa), 0);
+    lv_obj_set_style_border_color(doorlock_nfc_panel, lv_color_hex(0xd0d7de), 0);
+    lv_obj_set_style_border_width(doorlock_nfc_panel, 1, 0);
+    lv_obj_set_style_shadow_width(doorlock_nfc_panel, 0, 0);
+
+    lv_obj_t *title = lv_label_create(doorlock_nfc_panel);
+    lv_label_set_text(title, "NFC管理");
+    lv_obj_set_style_text_font(title, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x111827), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 6);
+
+    doorlock_nfc_count_label = lv_label_create(doorlock_nfc_panel);
+    lv_obj_set_width(doorlock_nfc_count_label, 150);
+    lv_obj_set_style_text_align(doorlock_nfc_count_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_font(doorlock_nfc_count_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(doorlock_nfc_count_label, lv_color_hex(0x374151), 0);
+    lv_obj_align(doorlock_nfc_count_label, LV_ALIGN_TOP_RIGHT, -10, 6);
+
+    doorlock_create_nfc_action_btn(doorlock_nfc_panel, LV_SYMBOL_WIFI, "刷卡解锁", 10, 36,
+                                   lv_color_hex(0xd97706), doorlock_nfc_unlock_cb);
+    doorlock_create_nfc_action_btn(doorlock_nfc_panel, LV_SYMBOL_PLUS, "录入卡片", 155, 36,
+                                   lv_color_hex(0x2563eb), doorlock_nfc_enroll_cb);
+    doorlock_create_nfc_action_btn(doorlock_nfc_panel, LV_SYMBOL_TRASH, "清空卡片", 10, 80,
+                                   lv_color_hex(0x64748b), doorlock_nfc_clear_cb);
+    doorlock_create_nfc_action_btn(doorlock_nfc_panel, LV_SYMBOL_LEFT, "返回", 155, 80,
+                                   lv_color_hex(0x2f855a), doorlock_nfc_close_cb);
+
+    doorlock_nfc_update_count_label();
 }
 
 static lv_obj_t *doorlock_create_menu_btn(lv_obj_t * parent, const char *symbol, const char *text,
@@ -2014,7 +2429,7 @@ void lv_main_page(void)
     lv_obj_t *main_page2_label = lv_label_create(main_obj2);
     lv_obj_set_style_text_font(main_page2_label, &font_alipuhui20, 0);
     lv_obj_set_style_text_color(main_page2_label, lv_color_hex(0xffffff), 0);
-    lv_label_set_text(main_page2_label, "智能门锁");
+    lv_label_set_text(main_page2_label, "欢迎使用立创实战派开发板");
     lv_obj_align_to(main_page2_label, main_obj2, LV_ALIGN_TOP_LEFT, 8, 5);
 
     // 设置应用图标style

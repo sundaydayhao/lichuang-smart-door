@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdint.h>
 #include <string.h>
 #include "math.h"
 #include "esp_err.h"
@@ -142,8 +143,16 @@ uint8_t qmi8658_fetch_motion(void); // 获取运动状态
 #define PN532_I2C_SDA          BSP_I2C_SDA      // PN532 SDA接IO1
 #define PN532_I2C_SCL          BSP_I2C_SCL      // PN532 SCL接IO2
 #define PN532_I2C_ADDR         0x24             // PN532 7位I2C地址
+#define PN532_UID_MAX_LEN      10
+
+typedef struct {
+    uint8_t len;
+    uint8_t data[PN532_UID_MAX_LEN];
+} pn532_card_t;
 
 esp_err_t pn532_i2c_probe(void); // 探测PN532是否在线
+esp_err_t pn532_i2c_init(void); // 初始化PN532读卡模式
+esp_err_t pn532_read_passive_target(pn532_card_t *card, uint32_t timeout_ms); // 读取ISO14443A卡片UID
 /***************************  NFC PN532 ↑  **************************************/
 /*******************************************************************************/
 
