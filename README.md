@@ -10,7 +10,7 @@
 - 音乐播放器：从 SPIFFS 的 `/spiffs` 目录扫描音频文件，支持播放、暂停、上一首、下一首和音量调节。
 - TF 卡浏览：挂载 SDMMC 1-bit TF 卡，按文件类型显示文件列表，并支持进入/返回目录。
 - 摄像头：初始化 DVP 摄像头，以 RGB565/QVGA 格式在 LCD 上实时显示。
-- 门锁控制：支持本地人脸模板录入/刷脸解锁、NFC 卡片录入/刷卡解锁，解锁后 8 秒自动上锁。
+- 门锁控制：支持本地人脸模板录入/刷脸解锁、AS608 指纹录入/指纹解锁、NFC 卡片录入/刷卡解锁，解锁后 8 秒自动上锁。
 - WiFi 设置：扫描附近 WLAN，输入密码连接，连接成功后通过 SNTP 同步时间。
 - 蓝牙控制器：作为 BLE HID 设备广播，提供音量加/减控制。
 
@@ -38,8 +38,11 @@
 | Audio I2S | MCLK: GPIO38, BCLK: GPIO14, LRCK: GPIO13, DOUT: GPIO45, DIN: GPIO12 |
 | TF Card | CMD: GPIO48, CLK: GPIO47, D0: GPIO21 |
 | Camera | XCLK: GPIO5, PCLK: GPIO7, VSYNC: GPIO3, HREF: GPIO46, D0-D7: GPIO16/18/8/17/15/6/4/9 |
+| AS608 指纹 | 模块 TX -> GPIO10(ESP RX), 模块 RX -> GPIO11(ESP TX), 57600 8N1 |
 
 门锁电控输出默认不占用 GPIO：`main/esp32_s3_szp.h` 中 `DOORLOCK_CTRL_GPIO` 默认为 `GPIO_NUM_NC`。如需接继电器或电控锁，请改成实际控制引脚，并通过 `DOORLOCK_UNLOCK_LEVEL` 配置开锁有效电平。
+
+AS608 会在开机后台自动探测一次：先采样 IO10/IO11 的空闲电平，判断哪根线更像模块 TX，再按安全方向握手。探测会扫描 57600、9600、115200、38400、19200 等常见波特率；若对调后成功，串口日志和门锁页“指纹管理”会提示 RX/TX 接反。若探测失败且只识别出一根模块 TX 候选线，固件会释放 UART 引脚，并只在另一根线上输出短暂 TX 诊断脉冲和 FPM10A 校验帧，方便测量 ESP TX 到 AS608 RX 的连线。
 
 ## 软件依赖
 
@@ -88,6 +91,8 @@
 │   ├── main.c              # app_main 入口
 │   ├── app_ui.c/.h         # LVGL 界面与应用逻辑
 │   ├── esp32_s3_szp.c/.h   # 板级外设初始化与驱动封装
+│   ├── doorlock_face.c/.h  # 本地人脸模板录入与验证
+│   ├── doorlock_fingerprint.c/.h # AS608 指纹录入与验证
 │   ├── bt/                 # BLE HID 相关实现
 │   ├── assets/             # LVGL 图片和字体资源
 │   ├── idf_component.yml   # 组件依赖声明

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "esp32_s3_szp.h"
 #include "app_ui.h"
+#include "doorlock_fingerprint.h"
 #include "nvs_flash.h"
 #include <esp_system.h>
 
@@ -8,6 +9,34 @@
 EventGroupHandle_t my_event_group;
 
 static const char *TAG = "MAIN";
+
+static void fingerprint_probe_task(void *arg)
+{
+    (void)arg;
+
+    vTaskDelay(pdMS_TO_TICKS(800));
+
+    doorlock_fingerprint_status_t status = {0};
+    esp_err_t ret = doorlock_fingerprint_probe(&status);
+
+    if (ret == ESP_OK) {
+        if (status.wiring == DOORLOCK_FINGERPRINT_WIRING_SWAPPED) {
+            ESP_LOGW(TAG, "AS608 OK but RX/TX look swapped. Software now uses RX=IO11, TX=IO10, baud=%lu, templates=%u/%u",
+                     (unsigned long)status.baudrate, status.template_count, status.capacity);
+        } else {
+            ESP_LOGI(TAG, "AS608 OK on RX=IO10, TX=IO11, baud=%lu, templates=%u/%u",
+                     (unsigned long)status.baudrate, status.template_count, status.capacity);
+        }
+    } else {
+        ESP_LOGW(TAG, "AS608 probe failed on IO10/IO11: %s. RX levels float/pulldown/pullup: IO10=%d/%d/%d IO11=%d/%d/%d. Check power, GND, baudrate, and RX/TX wiring",
+                 esp_err_to_name(ret),
+                 status.normal_rx_idle_level, status.normal_rx_pull_down_level, status.normal_rx_pull_up_level,
+                 status.swapped_rx_idle_level, status.swapped_rx_pull_down_level, status.swapped_rx_pull_up_level);
+        (void)doorlock_fingerprint_tx_diagnostic();
+    }
+
+    vTaskDelete(NULL);
+}
 
 // 打印内存使用情况
 void displayMemoryUsage() {
@@ -66,6 +95,7 @@ void app_main(void)
 
     xTaskCreatePinnedToCore(power_music_task, "power_music_task", 4*1024, NULL, 5, NULL, 1); // 播放开机音乐
     xTaskCreatePinnedToCore(main_page_task, "main_page_task", 4*1024, NULL, 5, NULL, 0); // 主界面任务
+    xTaskCreatePinnedToCore(fingerprint_probe_task, "fingerprint_probe", 4*1024, NULL, 4, NULL, 1); // 检测AS608串口接线
 
     while (true) {
         displayMemoryUsage();

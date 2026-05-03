@@ -1,6 +1,7 @@
 #include "app_ui.h"
 #include "audio_player.h"
 #include "doorlock_face.h"
+#include "doorlock_fingerprint.h"
 #include "esp32_s3_szp.h"
 #include "file_iterator.h"
 #include "string.h"
@@ -1888,10 +1889,13 @@ static lv_obj_t *doorlock_status_label;
 static lv_obj_t *doorlock_hint_label;
 static lv_obj_t *doorlock_face_panel;
 static lv_obj_t *doorlock_face_count_label;
+static lv_obj_t *doorlock_fingerprint_panel;
+static lv_obj_t *doorlock_fingerprint_count_label;
 static lv_obj_t *doorlock_nfc_panel;
 static lv_obj_t *doorlock_nfc_count_label;
 static lv_timer_t *doorlock_auto_lock_timer;
 static bool doorlock_face_busy;
+static bool doorlock_fingerprint_busy;
 static bool doorlock_nfc_busy;
 
 #define DOORLOCK_AUTO_LOCK_MS           8000
@@ -1923,6 +1927,13 @@ typedef enum {
     DOORLOCK_FACE_ACTION_UNLOCK = 0,
     DOORLOCK_FACE_ACTION_ENROLL,
 } doorlock_face_action_t;
+
+typedef enum {
+    DOORLOCK_FINGERPRINT_ACTION_PROBE = 0,
+    DOORLOCK_FINGERPRINT_ACTION_UNLOCK,
+    DOORLOCK_FINGERPRINT_ACTION_ENROLL,
+    DOORLOCK_FINGERPRINT_ACTION_CLEAR,
+} doorlock_fingerprint_action_t;
 
 static void doorlock_update_status(void)
 {
@@ -2140,6 +2151,15 @@ static void doorlock_face_close_panel(void)
     }
 }
 
+static void doorlock_fingerprint_close_panel(void)
+{
+    if (doorlock_fingerprint_panel != NULL) {
+        lv_obj_del(doorlock_fingerprint_panel);
+        doorlock_fingerprint_panel = NULL;
+        doorlock_fingerprint_count_label = NULL;
+    }
+}
+
 static const char *doorlock_face_error_hint(esp_err_t ret)
 {
     switch (ret) {
@@ -2304,6 +2324,8 @@ static void btn_doorlock_back_cb(lv_event_t * e)
     doorlock_hint_label = NULL;
     doorlock_face_panel = NULL;
     doorlock_face_count_label = NULL;
+    doorlock_fingerprint_panel = NULL;
+    doorlock_fingerprint_count_label = NULL;
     doorlock_nfc_panel = NULL;
     doorlock_nfc_count_label = NULL;
     icon_flag = 0;
@@ -2312,6 +2334,8 @@ static void btn_doorlock_back_cb(lv_event_t * e)
 static void doorlock_face_cb(lv_event_t * e)
 {
     (void)e;
+
+    doorlock_fingerprint_close_panel();
 
     if (doorlock_nfc_panel != NULL) {
         lv_obj_del(doorlock_nfc_panel);
@@ -2364,10 +2388,303 @@ static void doorlock_face_cb(lv_event_t * e)
     doorlock_face_update_count_label();
 }
 
+static void doorlock_fingerprint_set_count_label(bool online, uint16_t count, uint16_t capacity)
+{
+    if (doorlock_fingerprint_count_label == NULL) {
+        return;
+    }
+
+    if (!online) {
+        lv_label_set_text(doorlock_fingerprint_count_label, "AS608离线");
+    } else {
+        lv_label_set_text_fmt(doorlock_fingerprint_count_label, "已录入：%u/%u", count, capacity);
+    }
+}
+
+static const char *doorlock_fingerprint_error_hint(esp_err_t ret)
+{
+    switch (ret) {
+    case ESP_ERR_NOT_FOUND:
+        return "未匹配到指纹或尚未录入";
+    case ESP_ERR_TIMEOUT:
+        return "未检测到手指或模块无响应";
+    case ESP_ERR_INVALID_RESPONSE:
+        return "采集质量不足或两次指纹不一致";
+    case ESP_ERR_NO_MEM:
+        return "指纹库已满，请先清空";
+    case ESP_ERR_INVALID_ARG:
+        return "指纹ID超出模块容量";
+    case ESP_ERR_INVALID_STATE:
+        return "模块密码或状态异常";
+    default:
+        return esp_err_to_name(ret);
+    }
+}
+
+static void doorlock_fingerprint_format_probe_hint(const doorlock_fingerprint_status_t *status,
+                                                   char *buf, size_t buf_size)
+{
+    if (status->wiring == DOORLOCK_FINGERPRINT_WIRING_NORMAL) {
+        snprintf(buf, buf_size, "AS608通信正常：%lu，模块TX->IO10，模块RX->IO11",
+                 (unsigned long)status->baudrate);
+    } else if (status->wiring == DOORLOCK_FINGERPRINT_WIRING_SWAPPED) {
+        snprintf(buf, buf_size, "AS608通信成功：%lu，但RX/TX接反；已软件对调IO10/IO11",
+                 (unsigned long)status->baudrate);
+    } else {
+        snprintf(buf, buf_size, "AS608未响应：IO10=%d/%d/%d IO11=%d/%d/%d",
+                 status->normal_rx_idle_level, status->normal_rx_pull_down_level, status->normal_rx_pull_up_level,
+                 status->swapped_rx_idle_level, status->swapped_rx_pull_down_level, status->swapped_rx_pull_up_level);
+    }
+}
+
+static void doorlock_fingerprint_task(void *arg)
+{
+    doorlock_fingerprint_action_t action = (doorlock_fingerprint_action_t)(intptr_t)arg;
+    doorlock_fingerprint_status_t status = {0};
+    char hint_text[192] = {0};
+    uint16_t count = 0;
+    uint16_t capacity = DOORLOCK_FINGERPRINT_DEFAULT_CAPACITY;
+    uint16_t slot = 0;
+    uint16_t score = 0;
+    bool unlock_success = false;
+    bool have_count = false;
+    bool online = false;
+    esp_err_t ret = ESP_OK;
+
+    switch (action) {
+    case DOORLOCK_FINGERPRINT_ACTION_PROBE:
+        ret = doorlock_fingerprint_probe(&status);
+        if (ret == ESP_OK) {
+            online = true;
+            have_count = true;
+            count = status.template_count;
+            capacity = status.capacity;
+            doorlock_fingerprint_format_probe_hint(&status, hint_text, sizeof(hint_text));
+        } else {
+            esp_err_t diag_ret = doorlock_fingerprint_tx_diagnostic();
+            snprintf(hint_text, sizeof(hint_text), "AS608检测失败：%s，IO10=%d/%d/%d IO11=%d/%d/%d；%s",
+                     doorlock_fingerprint_error_hint(ret),
+                     status.normal_rx_idle_level, status.normal_rx_pull_down_level, status.normal_rx_pull_up_level,
+                     status.swapped_rx_idle_level, status.swapped_rx_pull_down_level, status.swapped_rx_pull_up_level,
+                     diag_ret == ESP_ERR_INVALID_STATE ? "TX诊断已跳过" : "已输出TX诊断");
+        }
+        break;
+    case DOORLOCK_FINGERPRINT_ACTION_ENROLL:
+        ret = doorlock_fingerprint_enroll(&slot);
+        if (ret == ESP_OK) {
+            snprintf(hint_text, sizeof(hint_text), "指纹录入成功：ID%u", slot);
+            if (doorlock_fingerprint_get_count(&count, &capacity) == ESP_OK) {
+                online = true;
+                have_count = true;
+            }
+        } else {
+            snprintf(hint_text, sizeof(hint_text), "指纹录入失败：%s，代码0x%02X",
+                     doorlock_fingerprint_error_hint(ret), doorlock_fingerprint_get_last_code());
+        }
+        break;
+    case DOORLOCK_FINGERPRINT_ACTION_UNLOCK:
+        ret = doorlock_fingerprint_verify(&slot, &score);
+        if (ret == ESP_OK) {
+            unlock_success = true;
+            snprintf(hint_text, sizeof(hint_text), "指纹解锁成功：ID%u 分数%u，8秒后自动上锁", slot, score);
+            if (doorlock_fingerprint_get_count(&count, &capacity) == ESP_OK) {
+                online = true;
+                have_count = true;
+            }
+        } else {
+            snprintf(hint_text, sizeof(hint_text), "指纹解锁失败：%s，代码0x%02X",
+                     doorlock_fingerprint_error_hint(ret), doorlock_fingerprint_get_last_code());
+        }
+        break;
+    case DOORLOCK_FINGERPRINT_ACTION_CLEAR:
+        ret = doorlock_fingerprint_clear();
+        if (ret == ESP_OK) {
+            snprintf(hint_text, sizeof(hint_text), "AS608：已清空所有指纹模板");
+            if (doorlock_fingerprint_get_count(&count, &capacity) == ESP_OK) {
+                online = true;
+                have_count = true;
+            }
+        } else {
+            snprintf(hint_text, sizeof(hint_text), "指纹清空失败：%s，代码0x%02X",
+                     doorlock_fingerprint_error_hint(ret), doorlock_fingerprint_get_last_code());
+        }
+        break;
+    default:
+        snprintf(hint_text, sizeof(hint_text), "指纹：未知操作");
+        break;
+    }
+
+    lvgl_port_lock(0);
+    doorlock_fingerprint_busy = false;
+    if (icon_flag == 7 && doorlock_hint_label != NULL) {
+        if (unlock_success) {
+            doorlock_apply_locked_state(false);
+            doorlock_auto_lock_start();
+        }
+        doorlock_set_hint(hint_text);
+        if (have_count) {
+            doorlock_fingerprint_set_count_label(online, count, capacity);
+        } else if (action == DOORLOCK_FINGERPRINT_ACTION_PROBE) {
+            doorlock_fingerprint_set_count_label(false, 0, capacity);
+        }
+    }
+    lvgl_port_unlock();
+
+    vTaskDelete(NULL);
+}
+
+static void doorlock_fingerprint_start_action(doorlock_fingerprint_action_t action)
+{
+    BaseType_t task_ret;
+
+    if (doorlock_fingerprint_busy) {
+        doorlock_set_hint("AS608正在执行操作，请稍等");
+        return;
+    }
+
+    doorlock_fingerprint_busy = true;
+    switch (action) {
+    case DOORLOCK_FINGERPRINT_ACTION_PROBE:
+        doorlock_set_hint("AS608检测：正在测试IO10/IO11是否接反");
+        break;
+    case DOORLOCK_FINGERPRINT_ACTION_UNLOCK:
+        doorlock_set_hint("指纹解锁：请在5秒内按已录入手指");
+        break;
+    case DOORLOCK_FINGERPRINT_ACTION_ENROLL:
+        doorlock_set_hint("指纹录入：同一手指按两次，中间先移开");
+        break;
+    case DOORLOCK_FINGERPRINT_ACTION_CLEAR:
+        doorlock_set_hint("AS608：正在清空指纹库");
+        break;
+    default:
+        break;
+    }
+
+    task_ret = xTaskCreatePinnedToCore(doorlock_fingerprint_task, "doorlock_fp_task", 5 * 1024,
+                                       (void *)(intptr_t)action, 5, NULL, 1);
+    if (task_ret != pdPASS) {
+        doorlock_fingerprint_busy = false;
+        doorlock_set_hint("AS608：任务创建失败");
+    }
+}
+
+static void doorlock_fingerprint_probe_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_fingerprint_start_action(DOORLOCK_FINGERPRINT_ACTION_PROBE);
+}
+
+static void doorlock_fingerprint_unlock_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_fingerprint_start_action(DOORLOCK_FINGERPRINT_ACTION_UNLOCK);
+}
+
+static void doorlock_fingerprint_enroll_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_fingerprint_start_action(DOORLOCK_FINGERPRINT_ACTION_ENROLL);
+}
+
+static void doorlock_fingerprint_clear_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_fingerprint_start_action(DOORLOCK_FINGERPRINT_ACTION_CLEAR);
+}
+
+static void doorlock_fingerprint_close_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_fingerprint_close_panel();
+    doorlock_set_hint("请选择解锁方式");
+}
+
+static lv_obj_t *doorlock_create_fingerprint_action_btn(lv_obj_t * parent, const char *symbol, const char *text,
+                                                        lv_coord_t x, lv_coord_t y, lv_color_t color,
+                                                        lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 135, 28);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, color, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *icon = lv_label_create(btn);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xffffff), 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_width(label, 88);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 38, 0);
+
+    return btn;
+}
+
 static void doorlock_fingerprint_cb(lv_event_t * e)
 {
     (void)e;
-    doorlock_set_hint("指纹解锁：菜单框架已创建，等待接入指纹模块驱动");
+
+    doorlock_face_close_panel();
+    if (doorlock_nfc_panel != NULL) {
+        lv_obj_del(doorlock_nfc_panel);
+        doorlock_nfc_panel = NULL;
+        doorlock_nfc_count_label = NULL;
+    }
+
+    if (doorlock_fingerprint_panel != NULL) {
+        lv_obj_move_foreground(doorlock_fingerprint_panel);
+        doorlock_set_hint("指纹管理：可检测接线、录入或解锁");
+        return;
+    }
+
+    doorlock_set_hint("指纹管理：先检测AS608接线");
+
+    doorlock_fingerprint_panel = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(doorlock_fingerprint_panel, 300, 132);
+    lv_obj_align(doorlock_fingerprint_panel, LV_ALIGN_TOP_MID, 0, 102);
+    lv_obj_clear_flag(doorlock_fingerprint_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(doorlock_fingerprint_panel, 8, 0);
+    lv_obj_set_style_pad_all(doorlock_fingerprint_panel, 0, 0);
+    lv_obj_set_style_bg_color(doorlock_fingerprint_panel, lv_color_hex(0xf5f7fa), 0);
+    lv_obj_set_style_border_color(doorlock_fingerprint_panel, lv_color_hex(0xd0d7de), 0);
+    lv_obj_set_style_border_width(doorlock_fingerprint_panel, 1, 0);
+    lv_obj_set_style_shadow_width(doorlock_fingerprint_panel, 0, 0);
+
+    lv_obj_t *title = lv_label_create(doorlock_fingerprint_panel);
+    lv_label_set_text(title, "指纹管理");
+    lv_obj_set_style_text_font(title, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x111827), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 6);
+
+    doorlock_fingerprint_count_label = lv_label_create(doorlock_fingerprint_panel);
+    lv_obj_set_width(doorlock_fingerprint_count_label, 150);
+    lv_obj_set_style_text_align(doorlock_fingerprint_count_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_font(doorlock_fingerprint_count_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(doorlock_fingerprint_count_label, lv_color_hex(0x374151), 0);
+    lv_label_set_text(doorlock_fingerprint_count_label, "检测中");
+    lv_obj_align(doorlock_fingerprint_count_label, LV_ALIGN_TOP_RIGHT, -10, 6);
+
+    doorlock_create_fingerprint_action_btn(doorlock_fingerprint_panel, LV_SYMBOL_REFRESH, "检测接线", 10, 34,
+                                           lv_color_hex(0x0f766e), doorlock_fingerprint_probe_cb);
+    doorlock_create_fingerprint_action_btn(doorlock_fingerprint_panel, LV_SYMBOL_OK, "指纹解锁", 155, 34,
+                                           lv_color_hex(0x2f855a), doorlock_fingerprint_unlock_cb);
+    doorlock_create_fingerprint_action_btn(doorlock_fingerprint_panel, LV_SYMBOL_PLUS, "录入指纹", 10, 68,
+                                           lv_color_hex(0x2563eb), doorlock_fingerprint_enroll_cb);
+    doorlock_create_fingerprint_action_btn(doorlock_fingerprint_panel, LV_SYMBOL_TRASH, "清空指纹", 155, 68,
+                                           lv_color_hex(0x64748b), doorlock_fingerprint_clear_cb);
+    doorlock_create_fingerprint_action_btn(doorlock_fingerprint_panel, LV_SYMBOL_LEFT, "返回", 82, 102,
+                                           lv_color_hex(0xd97706), doorlock_fingerprint_close_cb);
+
+    doorlock_fingerprint_start_action(DOORLOCK_FINGERPRINT_ACTION_PROBE);
 }
 
 static void doorlock_nfc_task(void *arg)
@@ -2555,6 +2872,7 @@ static void doorlock_nfc_cb(lv_event_t * e)
     (void)e;
 
     doorlock_face_close_panel();
+    doorlock_fingerprint_close_panel();
 
     if (doorlock_nfc_panel != NULL) {
         lv_obj_move_foreground(doorlock_nfc_panel);

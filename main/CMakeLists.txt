@@ -1,4 +1,4 @@
-idf_component_register(SRCS "esp32_s3_szp.c" "main.c" "app_ui.c" "doorlock_face.c"
+idf_component_register(SRCS "esp32_s3_szp.c" "main.c" "app_ui.c" "doorlock_face.c" "doorlock_fingerprint.c"
                        SRCS "assets/image_lckfb_logo.c"
                        SRCS "assets/img_att_icon.c"
                        SRCS "assets/img_btset_icon.c"
