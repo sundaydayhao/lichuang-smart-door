@@ -23,6 +23,8 @@ lv_obj_t * main_text_label; // 主界面 欢迎语
 lv_obj_t * icon_in_obj; // 应用界面
 int icon_flag; // 标记现在进入哪个应用 在主界面时为0
 
+static void doorlock_event_handler(lv_event_t * e);
+
 /*********************** 开机界面 ****************************/
 lv_obj_t * lckfb_logo;
 // 设置角度的回调函数
@@ -1775,6 +1777,177 @@ static void btset_event_handler(lv_event_t * e)
 }
 
 
+/******************************** 第7个图标 门锁 应用程序 *****************************************************************************/
+static bool doorlock_locked = true;
+static lv_obj_t *doorlock_status_label;
+static lv_obj_t *doorlock_hint_label;
+
+static void doorlock_update_status(void)
+{
+    if (doorlock_status_label == NULL) {
+        return;
+    }
+
+    if (doorlock_locked) {
+        lv_label_set_text(doorlock_status_label, "门锁状态：已上锁");
+    } else {
+        lv_label_set_text(doorlock_status_label, "门锁状态：已开锁");
+    }
+}
+
+static void doorlock_set_hint(const char *text)
+{
+    if (doorlock_hint_label == NULL) {
+        return;
+    }
+
+    lv_label_set_text(doorlock_hint_label, text);
+}
+
+static void btn_doorlock_back_cb(lv_event_t * e)
+{
+    (void)e;
+    lv_obj_del(icon_in_obj);
+    icon_in_obj = NULL;
+    doorlock_status_label = NULL;
+    doorlock_hint_label = NULL;
+    icon_flag = 0;
+}
+
+static void doorlock_face_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_set_hint("人脸识别：菜单框架已创建，等待接入摄像头识别流程");
+}
+
+static void doorlock_fingerprint_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_set_hint("指纹解锁：菜单框架已创建，等待接入指纹模块驱动");
+}
+
+static void doorlock_nfc_cb(lv_event_t * e)
+{
+    (void)e;
+
+    esp_err_t ret = pn532_i2c_probe();
+    if (ret == ESP_OK) {
+        doorlock_set_hint("NFC解锁：PN532已响应，I2C SDA=IO1 SCL=IO2");
+    } else {
+        lv_label_set_text_fmt(doorlock_hint_label, "NFC解锁：未检测到PN532，I2C地址0x%02X，%s", PN532_I2C_ADDR, esp_err_to_name(ret));
+    }
+}
+
+static lv_obj_t *doorlock_create_menu_btn(lv_obj_t * parent, const char *symbol, const char *text,
+                                          lv_coord_t y, lv_color_t color, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 270, 36);
+    lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, y);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, color, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *icon = lv_label_create(btn);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xffffff), 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 12, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 50, 0);
+
+    return btn;
+}
+
+static void doorlock_event_handler(lv_event_t * e)
+{
+    (void)e;
+
+    static lv_style_t style;
+    lv_style_init(&style);
+    lv_style_set_radius(&style, 10);
+    lv_style_set_bg_opa(&style, LV_OPA_COVER);
+    lv_style_set_bg_color(&style, lv_color_hex(0xffffff));
+    lv_style_set_border_width(&style, 0);
+    lv_style_set_pad_all(&style, 0);
+    lv_style_set_width(&style, 320);
+    lv_style_set_height(&style, 240);
+
+    icon_in_obj = lv_obj_create(lv_scr_act());
+    lv_obj_add_style(icon_in_obj, &style, 0);
+    lv_obj_clear_flag(icon_in_obj, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *doorlock_title = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(doorlock_title, 320, 40);
+    lv_obj_set_style_pad_all(doorlock_title, 0, 0);
+    lv_obj_align(doorlock_title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(doorlock_title, lv_color_hex(0x225047), 0);
+
+    lv_obj_t *doorlock_title_label = lv_label_create(doorlock_title);
+    lv_label_set_text(doorlock_title_label, "门锁控制");
+    lv_obj_set_style_text_color(doorlock_title_label, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(doorlock_title_label, &font_alipuhui20, 0);
+    lv_obj_align(doorlock_title_label, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t *btn_doorlock_back = lv_btn_create(doorlock_title);
+    lv_obj_align(btn_doorlock_back, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_size(btn_doorlock_back, 60, 30);
+    lv_obj_set_style_border_width(btn_doorlock_back, 0, 0);
+    lv_obj_set_style_pad_all(btn_doorlock_back, 0, 0);
+    lv_obj_set_style_bg_opa(btn_doorlock_back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(btn_doorlock_back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_doorlock_back, btn_doorlock_back_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label_back = lv_label_create(btn_doorlock_back);
+    lv_label_set_text(label_back, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(label_back, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label_back, lv_color_hex(0xffffff), 0);
+    lv_obj_align(label_back, LV_ALIGN_CENTER, -10, 0);
+
+    lv_obj_t *lock_view = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(lock_view, 58, 58);
+    lv_obj_align(lock_view, LV_ALIGN_TOP_LEFT, 22, 54);
+    lv_obj_set_style_radius(lock_view, 18, 0);
+    lv_obj_set_style_bg_color(lock_view, lv_color_hex(0x225047), 0);
+    lv_obj_set_style_bg_opa(lock_view, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(lock_view, 0, 0);
+    lv_obj_set_style_pad_all(lock_view, 0, 0);
+    lv_obj_set_style_shadow_width(lock_view, 0, 0);
+    lv_obj_clear_flag(lock_view, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *lock_img = lv_img_create(lock_view);
+    LV_IMG_DECLARE(img_doorlock_icon);
+    lv_img_set_src(lock_img, &img_doorlock_icon);
+    lv_img_set_zoom(lock_img, 190);
+    lv_obj_center(lock_img);
+
+    doorlock_status_label = lv_label_create(icon_in_obj);
+    lv_obj_set_style_text_color(doorlock_status_label, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_font(doorlock_status_label, &font_alipuhui20, 0);
+    lv_obj_align(doorlock_status_label, LV_ALIGN_TOP_LEFT, 96, 58);
+
+    doorlock_hint_label = lv_label_create(icon_in_obj);
+    lv_obj_set_width(doorlock_hint_label, 210);
+    lv_label_set_long_mode(doorlock_hint_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_color(doorlock_hint_label, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_text_font(doorlock_hint_label, &font_alipuhui20, 0);
+    lv_label_set_text(doorlock_hint_label, "请选择解锁方式");
+    lv_obj_align(doorlock_hint_label, LV_ALIGN_TOP_LEFT, 96, 84);
+
+    doorlock_create_menu_btn(icon_in_obj, LV_SYMBOL_EYE_OPEN, "人脸识别", 112, lv_color_hex(0x2563eb), doorlock_face_cb);
+    doorlock_create_menu_btn(icon_in_obj, LV_SYMBOL_OK, "指纹解锁", 152, lv_color_hex(0x2f855a), doorlock_fingerprint_cb);
+    doorlock_create_menu_btn(icon_in_obj, LV_SYMBOL_WIFI, "NFC解锁", 192, lv_color_hex(0xd97706), doorlock_nfc_cb);
+
+    doorlock_update_status();
+    icon_flag = 7;
+}
+
+
 /******************************** 主界面  ******************************/
 
 void lv_main_page(void)
@@ -1797,8 +1970,24 @@ void lv_main_page(void)
     lv_style_set_width(&style, 320);  
     lv_style_set_height(&style, 240); 
 
-    main_obj = lv_obj_create(lv_scr_act());
+    lv_obj_t *main_tileview = lv_tileview_create(lv_scr_act());
+    lv_obj_set_size(main_tileview, 320, 240);
+    lv_obj_align(main_tileview, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_scrollbar_mode(main_tileview, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_bg_opa(main_tileview, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(main_tileview, 0, 0);
+    lv_obj_set_style_pad_all(main_tileview, 0, 0);
+
+    main_obj = lv_tileview_add_tile(main_tileview, 0, 0, LV_DIR_RIGHT);
     lv_obj_add_style(main_obj, &style, 0);
+    lv_obj_clear_flag(main_obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(main_obj, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *main_obj2 = lv_tileview_add_tile(main_tileview, 1, 0, LV_DIR_LEFT);
+    lv_obj_add_style(main_obj2, &style, 0);
+    lv_obj_clear_flag(main_obj2, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(main_obj2, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_tile_id(main_tileview, 0, 0, LV_ANIM_OFF);
 
     // 显示右上角符号
     lv_obj_t * sylbom_label = lv_label_create(main_obj);
@@ -1814,6 +2003,19 @@ void lv_main_page(void)
     lv_obj_set_width(main_text_label, 280);
     lv_label_set_text(main_text_label, "欢迎使用立创实战派开发板");
     lv_obj_align_to(main_text_label, main_obj, LV_ALIGN_TOP_LEFT, 8, 5);
+
+    // 第二屏顶部信息
+    lv_obj_t *sylbom_label2 = lv_label_create(main_obj2);
+    lv_obj_set_style_text_font(sylbom_label2, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(sylbom_label2, lv_color_hex(0xffffff), 0);
+    lv_label_set_text(sylbom_label2, LV_SYMBOL_BLUETOOTH" "LV_SYMBOL_WIFI);
+    lv_obj_align_to(sylbom_label2, main_obj2, LV_ALIGN_TOP_RIGHT, -10, 10);
+
+    lv_obj_t *main_page2_label = lv_label_create(main_obj2);
+    lv_obj_set_style_text_font(main_page2_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(main_page2_label, lv_color_hex(0xffffff), 0);
+    lv_label_set_text(main_page2_label, "智能门锁");
+    lv_obj_align_to(main_page2_label, main_obj2, LV_ALIGN_TOP_LEFT, 8, 5);
 
     // 设置应用图标style
     static lv_style_t btn_style;
@@ -1897,6 +2099,18 @@ void lv_main_page(void)
     LV_IMG_DECLARE(img_btset_icon);
     lv_img_set_src(img6, &img_btset_icon);
     lv_obj_align(img6, LV_ALIGN_CENTER, 0, 0);
+
+    // 创建第7个应用图标：门锁，放在第二屏
+    lv_obj_t *icon7 = lv_btn_create(main_obj2);
+    lv_obj_add_style(icon7, &btn_style, 0);
+    lv_obj_set_style_bg_color(icon7, lv_color_hex(0x225047), 0);
+    lv_obj_set_pos(icon7, 15, 50);
+    lv_obj_add_event_cb(icon7, doorlock_event_handler, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * img7 = lv_img_create(icon7);
+    LV_IMG_DECLARE(img_doorlock_icon);
+    lv_img_set_src(img7, &img_doorlock_icon);
+    lv_obj_align(img7, LV_ALIGN_CENTER, 0, 0);
 
     lvgl_port_unlock();
 }
