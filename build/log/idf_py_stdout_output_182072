@@ -1,0 +1,166 @@
+Command: /home/hao/.espressif/python_env/idf5.5_py3.10_env/bin/python /home/hao/esp/esp-idf/tools/idf_monitor.py -p /dev/ttyUSB0 -b 115200 --toolchain-prefix xtensa-esp32s3-elf- --target esp32s3 --revision 0 /home/hao/下载/立创·实战派ESP32-S3开发板资料/01-例程/立创实战派ESP32-S3-例程-IDF5.4/szpi-s3-esp/14-handheld/build/handheld.elf /home/hao/下载/立创·实战派ESP32-S3开发板资料/01-例程/立创实战派ESP32-S3-例程-IDF5.4/szpi-s3-esp/14-handheld/build/bootloader/bootloader.elf -m '/home/hao/.espressif/python_env/idf5.5_py3.10_env/bin/python' '/home/hao/esp/esp-idf/tools/idf.py' '-p' '/dev/ttyUSB0'
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0xb (SPI_FAST_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x14f0
+load:0x403c8700,len:0xd24
+load:0x403cb700,len:0x2ef0
+entry 0x403c8924
+[0;32mI (24) boot: ESP-IDF v5.5.3 2nd stage bootloader[0m
+[0;32mI (25) boot: compile time May  3 2026 11:22:55[0m
+[0;32mI (25) boot: Multicore bootloader[0m
+[0;32mI (25) boot: chip revision: v0.2[0m
+[0;32mI (28) boot: efuse block revision: v1.3[0m
+[0;32mI (31) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (35) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (39) boot.esp32s3: SPI Flash Size : 16MB[0m
+[0;32mI (43) boot: Enabling RNG early entropy source...[0m
+[0;32mI (47) boot: Partition Table:[0m
+[0;32mI (50) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (63) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (69) boot:  2 factory          factory app      00 00 00010000 00800000[0m
+[0;32mI (76) boot:  3 storage          Unknown data     01 82 00810000 00300000[0m
+[0;32mI (82) boot: End of partition table[0m
+[0;32mI (86) esp_image: segment 0: paddr=00010020 vaddr=3c150020 size=613848h (6371400) map[0m
+[0;32mI (1215) esp_image: segment 1: paddr=00623870 vaddr=3fca7900 size=087c8h ( 34760) load[0m
+[0;32mI (1228) esp_image: segment 2: paddr=0062c040 vaddr=40378000 size=03fd8h ( 16344) load[0m
+[0;32mI (1231) esp_image: segment 3: paddr=00630020 vaddr=42000020 size=147e3ch (1343036) map[0m
+[0;32mI (1468) esp_image: segment 4: paddr=00777e64 vaddr=4037bfd8 size=1b8a8h (112808) load[0m
+[0;32mI (1493) esp_image: segment 5: paddr=00793714 vaddr=50000000 size=00020h (    32) load[0m
+[0;32mI (1506) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (1506) boot: Disabling RNG early entropy source...[0m
+[0;32mI (1517) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (1517) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (1517) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (1519) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (1524) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (1528) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (1532) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (1537) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (1542) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (1547) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (1552) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (1556) MSPI Timing: Enter psram timing tuning[0m
+[0;32mI (1561) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (1564) esp_psram: Speed: 80MHz[0m
+[0;32mI (1568) cpu_start: Multicore app[0m
+[0;32mI (1869) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (1877) cpu_start: GPIO 44 and 43 are used as console UART I/O pins[0m
+[0;32mI (1878) cpu_start: Pro cpu start user code[0m
+[0;32mI (1878) cpu_start: cpu freq: 240000000 Hz[0m
+[0;32mI (1880) app_init: Application information:[0m
+[0;32mI (1884) app_init: Project name:     handheld[0m
+[0;32mI (1888) app_init: App version:      1[0m
+[0;32mI (1891) app_init: Compile time:     May  3 2026 11:22:47[0m
+[0;32mI (1896) app_init: ELF file SHA256:  a16beddcd...[0m
+[0;32mI (1901) app_init: ESP-IDF:          v5.5.3[0m
+[0;32mI (1905) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (1908) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (1913) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (1917) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (1923) heap_init: At 3FCB89C8 len 00030D48 (195 KiB): RAM[0m
+[0;32mI (1928) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (1933) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (1939) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (1946) spi_flash: detected chip: gd[0m
+[0;32mI (1949) spi_flash: flash io: dio[0m
+[0;32mI (1952) sleep_gpio: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (1958) sleep_gpio: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (1965) coexist: coex firmware version: 093e3d2[0m
+[0;32mI (1969) coexist: coexist rom version e7ae62f[0m
+[0;32mI (1974) main_task: Started on CPU0[0m
+[0;32mI (1994) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations[0m
+[0;32mI (1994) main_task: Calling app_main()[0m
+[0;32mI (2004) esp32_s3_szp: Starting I2C bus initialization...[0m
+[0;32mI (2004) esp32_s3_szp: I2C config: port=0, scl=2, sda=1, freq=100000[0m
+[0;32mI (2014) esp32_s3_szp: I2C bus initialized successfully[0m
+[0;32mI (2014) LVGL: Starting LVGL task[0m
+[0;32mI (2184) esp32_s3_szp: Starting touch screen initialization...[0m
+[0;32mI (2184) esp32_s3_szp: Creating touch screen I2C IO with port: 0[0m
+[0;32mI (2184) esp32_s3_szp: Creating FT5x06 touch screen driver[0m
+[0;32mI (2184) esp32_s3_szp: Touch screen initialized successfully[0m
+[0;32mI (2194) esp32_s3_szp: Setting LCD backlight: 100%[0m
+[0;32mI (2324) esp32_s3_szp: Partition size: total: 2884241, used: 2719836[0m
+[0;32mI (2324) esp32_s3_szp: Starting audio codec speaker initialization...[0m
+[0;32mI (2324) esp32_s3_szp: Initializing I2S peripheral...[0m
+[0;32mI (2324) esp32_s3_szp: Creating I2C control interface for ES8311 codec with port: 0[0m
+[0;32mI (2334) esp32_s3_szp: I2C control interface created successfully[0m
+[0;32mI (2344) ES8311: Work in Slave mode[0m
+[0;32mI (2344) esp32_s3_szp: Starting audio codec microphone initialization...[0m
+[0;32mI (2354) esp32_s3_szp: Creating I2C control interface for ES7210 codec with port: 0[0m
+[0;32mI (2354) esp32_s3_szp: I2C control interface created successfully[0m
+[0;32mI (2364) ES7210: Work in Slave mode[0m
+[0;32mI (2374) ES7210: Enable ES7210_INPUT_MIC1[0m
+[0;32mI (2374) ES7210: Enable ES7210_INPUT_MIC2[0m
+[0;32mI (2374) ES7210: Enable ES7210_INPUT_MIC3[0m
+[0;32mI (2384) ES7210: Enable ES7210_INPUT_MIC4[0m
+[0;32mI (2384) ES7210: Enable TDM mode[0m
+[0;32mI (2394) I2S_IF: channel mode 0 bits:16/16 channel:2 mask:3[0m
+[0;32mI (2394) I2S_IF: STD Mode 1 bits:16/16 channel:2 sample_rate:16000 mask:3[0m
+[0;32mI (2414) Adev_Codec: Open codec device OK[0m
+[0;32mI (2414) I2S_IF: channel mode 0 bits:16/16 channel:2 mask:3[0m
+[0;32mI (2414) I2S_IF: STD Mode 0 bits:16/16 channel:2 sample_rate:16000 mask:3[0m
+[0;32mI (2414) ES7210: Bits 8[0m
+[0;32mI (2424) ES7210: Enable ES7210_INPUT_MIC1[0m
+[0;32mI (2424) ES7210: Enable ES7210_INPUT_MIC2[0m
+[0;32mI (2434) ES7210: Enable ES7210_INPUT_MIC3[0m
+[0;32mI (2434) ES7210: Enable ES7210_INPUT_MIC4[0m
+[0;32mI (2434) ES7210: Enable TDM mode[0m
+[0;32mI (2444) ES7210: Unmuted[0m
+[0;32mI (2444) Adev_Codec: Open codec device OK[0m
+[0;32mI (2444) MAIN: DRAM Total: 263251 bytes, Used: 116924 bytes, Free: 146327 bytes,  DRAM_Largest_block: 102400 bytes[0m
+[0;32mI (2454) MAIN: DRAM Used: 44.42%[0m
+[0;32mI (2454) MAIN: PSRAM Total: 8388608 bytes, Used: 4940 bytes, Free: 8383668 bytes, PSRAM_Largest_block: 8257536 bytes[0m
+[0;32mI (2464) MAIN: PSRAM Used: 0.06%[0m
+[0;32mI (5654) esp32_s3_szp: [music] i2s music played, 204672 bytes are written.[0m
+[0;32mI (7464) MAIN: DRAM Total: 263251 bytes, Used: 110980 bytes, Free: 152271 bytes,  DRAM_Largest_block: 102400 bytes[0m
+[0;32mI (7464) MAIN: DRAM Used: 42.16%[0m
+[0;32mI (7464) MAIN: PSRAM Total: 8388608 bytes, Used: 4940 bytes, Free: 8383668 bytes, PSRAM_Largest_block: 8257536 bytes[0m
+[0;32mI (7474) MAIN: PSRAM Used: 0.06%[0m
+[0;32mI (10164) esp32_s3_szp: Starting camera initialization...[0m
+[0;32mI (10164) esp32_s3_szp: Camera config: sccb_i2c_port=0, pin_sccb_sda=-1, pin_sccb_scl=2[0m
+[0;32mI (10164) s3 ll_cam: DMA Channel=2[0m
+[0;32mI (10164) cam_hal: cam init ok[0m
+[0;32mI (10174) ov7725: Mismatch PID=0xe8[0m
+[0;32mI (10174) ov7760: Mismatch PID=0xe8[0m
+[0;32mI (10174) gc032a: Mismatch PID=0xf302[0m
+[0;32mI (10174) camera: Camera PID=0x9b VER=0x00 MIDL=0x00 MIDH=0x00[0m
+[0;32mI (10184) camera: Detected GC0308 camera[0m
+[0;32mI (10184) camera: Detected camera at address=0x21[0m
+[0;32mI (10434) cam_hal: PSRAM DMA mode disabled[0m
+[0;32mI (10434) s3 ll_cam: node_size: 3840, nodes_per_line: 1, lines_per_node: 6[0m
+[0;32mI (10434) s3 ll_cam: dma_half_buffer_min:  3840, dma_half_buffer: 15360, lines_per_half_buffer: 24, dma_buffer_size: 30720[0m
+[0;32mI (10444) cam_hal: buffer_size: 30720, half_buffer_size: 15360, node_buffer_size: 3840, node_cnt: 8, total_cnt: 10[0m
+[0;32mI (10454) cam_hal: Allocating 153600 Byte frame buffer in PSRAM[0m
+[0;32mI (10454) cam_hal: Allocating 153600 Byte frame buffer in PSRAM[0m
+[0;32mI (10464) cam_hal: cam config ok[0m
+[0;32mI (10464) gc0308: subsample win:640x480, ratio:0.500000[0m
+[0;32mI (12474) MAIN: DRAM Total: 263251 bytes, Used: 152464 bytes, Free: 110787 bytes,  DRAM_Largest_block: 65536 bytes[0m
+[0;32mI (12474) MAIN: DRAM Used: 57.92%[0m
+[0;32mI (12474) MAIN: PSRAM Total: 8388608 bytes, Used: 312300 bytes, Free: 8076308 bytes, PSRAM_Largest_block: 7995392 bytes[0m
+[0;32mI (12504) MAIN: PSRAM Used: 3.72%[0m
+[0;32mI (16984) file_iterator: File : little_changes.mp3[0m
+[0;32mI (17004) file_iterator: File : the_beginning.mp3[0m
+[0;32mI (17024) file_iterator: File : they_say.mp3[0m
+[0;32mI (17504) MAIN: DRAM Total: 263251 bytes, Used: 124108 bytes, Free: 139143 bytes,  DRAM_Largest_block: 94208 bytes[0m
+[0;32mI (17504) MAIN: DRAM Used: 47.14%[0m
+[0;32mI (17504) MAIN: PSRAM Total: 8388608 bytes, Used: 36192 bytes, Free: 8352416 bytes, PSRAM_Largest_block: 8257536 bytes[0m
+[0;32mI (17514) MAIN: PSRAM Used: 0.43%[0m
+state=0
+[0;32mI (17804) file_iterator: file_iterator_get_index() 0[0m
+[0;32mI (17804) app_ui: playing index '0'[0m
+[0;32mI (17804) app_ui: play_index(0)[0m
+[0;32mI (17804) app_ui: Playing '/spiffs/little_changes.mp3'[0m
+[0;32mI (17804) app_ui: ctx->audio_event = 2[0m
+[0;32mI (17814) app_ui: AUDIO_PLAYER_REQUEST_PLAY[0m
+state=1
+[0;32mI (19234) app_ui: ctx->audio_event = 3[0m
+[0;32mI (19234) app_ui: AUDIO_PLAYER_REQUEST_PAUSE[0m
+[0;32mI (19964) app_ui: ctx->audio_event = 4[0m
+[0;32mI (22514) MAIN: DRAM Total: 263251 bytes, Used: 112292 bytes, Free: 150959 bytes,  DRAM_Largest_block: 94208 bytes[0m
+[0;32mI (22514) MAIN: DRAM Used: 42.66%[0m
+[0;32mI (22514) MAIN: PSRAM Total: 8388608 bytes, Used: 4940 bytes, Free: 8383668 bytes, PSRAM_Largest_block: 8257536 bytes[0m
+[0;32mI (22524) MAIN: PSRAM Used: 0.06%[0m
