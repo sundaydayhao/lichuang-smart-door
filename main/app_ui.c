@@ -1,5 +1,6 @@
 #include "app_ui.h"
 #include "audio_player.h"
+#include "doorlock_face.h"
 #include "esp32_s3_szp.h"
 #include "file_iterator.h"
 #include "string.h"
@@ -931,6 +932,10 @@ static void task_process_camera(void *arg)
     while (icon_flag == 4)
     {
         camera_fb_t *frame = esp_camera_fb_get();
+        if (frame == NULL) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
         img_camera_dsc.data = frame->buf;
         lv_img_set_src(img_camera, &img_camera_dsc);
         esp_camera_fb_return(frame);
@@ -952,7 +957,7 @@ static void btn_camback_cb(lv_event_t * e)
 // 进入摄像头应用
 static void camera_event_handler(lv_event_t * e)
 {
-    bsp_camera_init(); // 摄像头初始化
+    (void)bsp_camera_init(); // 摄像头初始化
     // 创建一个界面对象
     static lv_style_t style;
     lv_style_init(&style);
@@ -1417,60 +1422,110 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
 {
     static int s_retry_num = 0;
+    EventGroupHandle_t wifi_event_group = s_wifi_event_group;
+
+    if (wifi_event_group == NULL) {
+        return;
+    }
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        xEventGroupSetBits(s_wifi_event_group, WIFI_START_BIT);
+        xEventGroupSetBits(wifi_event_group, WIFI_START_BIT);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
         if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
             ESP_LOGI(TAG, "retry to connect to the AP");
         } else {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
         }
         ESP_LOGI(TAG,"connect to the AP fail");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
 
 esp_event_handler_instance_t instance_any_id;
 esp_event_handler_instance_t instance_got_ip;
 esp_netif_t *sta_netif = NULL;
+static bool wifi_event_handlers_registered;
+static bool wifi_default_event_loop_created;
+static bool wifi_driver_initialized;
+static bool wifi_started;
+
+static void wifi_account_queue_delete(void)
+{
+    if (xQueueWifiAccount != NULL) {
+        vQueueDelete(xQueueWifiAccount);
+        xQueueWifiAccount = NULL;
+    }
+}
+
+static void wifiset_log_deinit_error(const char *step, esp_err_t err)
+{
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%s: %s", step, esp_err_to_name(err));
+    }
+}
 
 // 扫描附近wifi
 static void wifi_scan(wifi_ap_record_t ap_info[], uint16_t *ap_number)
 {
-    s_wifi_event_group = xEventGroupCreate();
+    if (s_wifi_event_group == NULL) {
+        s_wifi_event_group = xEventGroupCreate();
+    } else {
+        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT |
+                                                 WIFI_START_BIT | WIFI_GET_SNTP_BIT);
+    }
 
     ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    sta_netif = esp_netif_create_default_wifi_sta();
-    assert(sta_netif);
+    esp_err_t ret = esp_event_loop_create_default();
+    if (ret == ESP_OK) {
+        wifi_default_event_loop_created = true;
+    } else if (ret != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(ret);
+    }
+    if (sta_netif == NULL) {
+        sta_netif = esp_netif_create_default_wifi_sta();
+        assert(sta_netif);
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    if (!wifi_driver_initialized) {
+        ret = esp_wifi_init(&cfg);
+        if (ret == ESP_OK || ret == ESP_ERR_WIFI_INIT_STATE) {
+            wifi_driver_initialized = true;
+        } else {
+            ESP_ERROR_CHECK(ret);
+        }
+    }
 
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
+    if (!wifi_event_handlers_registered) {
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                            ESP_EVENT_ANY_ID,
+                                                            &event_handler,
+                                                            NULL,
+                                                            &instance_any_id));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                            IP_EVENT_STA_GOT_IP,
+                                                            &event_handler,
+                                                            NULL,
+                                                            &instance_got_ip));
+        wifi_event_handlers_registered = true;
+    }
     
     uint16_t ap_count = 0;
     
     memset(ap_info, 0, *ap_number * sizeof(wifi_ap_record_t));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    if (!wifi_started) {
+        ESP_ERROR_CHECK(esp_wifi_start());
+        wifi_started = true;
+    }
     esp_wifi_scan_start(NULL, true);
 
     ESP_LOGI(TAG, "Max AP number ap_info can hold = %u", *ap_number);
@@ -1482,18 +1537,63 @@ static void wifi_scan(wifi_ap_record_t ap_info[], uint16_t *ap_number)
 // 清除wifi初始化内容
 static void wifiset_deinit(void)
 {
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &instance_got_ip));
-    esp_err_t err = esp_wifi_stop();
-    if (err == ESP_ERR_WIFI_NOT_INIT) {
-        return;
+    esp_err_t err;
+
+    if (wifi_event_handlers_registered) {
+        err = esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id);
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+            wifiset_log_deinit_error("WIFI_EVENT unregister", err);
+        }
+
+        err = esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip);
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+            wifiset_log_deinit_error("IP_EVENT unregister", err);
+        }
+
+        instance_any_id = NULL;
+        instance_got_ip = NULL;
+        wifi_event_handlers_registered = false;
     }
-    ESP_ERROR_CHECK(err);
-    ESP_ERROR_CHECK(esp_wifi_deinit());
-    ESP_ERROR_CHECK(esp_wifi_clear_default_wifi_driver_and_handlers(sta_netif));
-    esp_netif_destroy(sta_netif);
-    sta_netif = NULL;
-    ESP_ERROR_CHECK(esp_event_loop_delete_default());
+
+    err = esp_wifi_stop();
+    if (err == ESP_ERR_WIFI_NOT_INIT) {
+        err = ESP_OK;
+    } else if (err == ESP_ERR_WIFI_NOT_STARTED) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        wifi_started = false;
+    }
+    wifiset_log_deinit_error("esp_wifi_stop", err);
+
+    err = esp_wifi_deinit();
+    if (err == ESP_ERR_WIFI_NOT_INIT) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        wifi_driver_initialized = false;
+    }
+    wifiset_log_deinit_error("esp_wifi_deinit", err);
+
+    if (sta_netif != NULL) {
+        err = esp_wifi_clear_default_wifi_driver_and_handlers(sta_netif);
+        wifiset_log_deinit_error("clear wifi driver handlers", err);
+        esp_netif_destroy(sta_netif);
+        sta_netif = NULL;
+    }
+
+    if (wifi_default_event_loop_created) {
+        err = esp_event_loop_delete_default();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            wifiset_log_deinit_error("event loop delete", err);
+        }
+        wifi_default_event_loop_created = false;
+    }
+
+    if (s_wifi_event_group != NULL) {
+        vEventGroupDelete(s_wifi_event_group);
+        s_wifi_event_group = NULL;
+    }
 }
 
 // WIFI连接任务
@@ -1541,7 +1641,6 @@ static void wifi_connect(void *arg)
                 lv_obj_del(wifi_connect_page); // 删除此页面
                 lv_obj_del(wifi_scan_page); // 删除此页面
                 lvgl_port_unlock();
-                vQueueDelete(xQueueWifiAccount); // 删除队列
                 icon_flag = 0; // 标记回到主界面
                 xTaskCreatePinnedToCore(get_time_task, "get_time_task", 2 * 1024, NULL, 5, NULL, 0);  // 创建获取时间任务
                 break; // 跳出while循环删除任务
@@ -1570,6 +1669,7 @@ static void wifi_connect(void *arg)
             }
         }
     }
+    wifi_account_queue_delete();
     vTaskDelete(NULL);
 }
 
@@ -1584,12 +1684,14 @@ static void btn_backmain_cb(lv_event_t * e)
     lvgl_port_unlock();
 
     // 通知wifi_connect任务退出
-    wifi_account_t wifi_account;
-    wifi_account.back_flag = 1; 
-    xQueueSend(xQueueWifiAccount, &wifi_account, portMAX_DELAY); 
+    if (xQueueWifiAccount != NULL) {
+        wifi_account_t wifi_account;
+        memset(&wifi_account, 0, sizeof(wifi_account));
+        wifi_account.back_flag = 1; 
+        xQueueSend(xQueueWifiAccount, &wifi_account, portMAX_DELAY);
+    }
     
     wifiset_deinit();// 清除wifi扫描痕迹
-    vQueueDelete(xQueueWifiAccount); // 删除队列
     icon_flag = 0;
 }
 
@@ -1784,9 +1886,12 @@ static void btset_event_handler(lv_event_t * e)
 static bool doorlock_locked = true;
 static lv_obj_t *doorlock_status_label;
 static lv_obj_t *doorlock_hint_label;
+static lv_obj_t *doorlock_face_panel;
+static lv_obj_t *doorlock_face_count_label;
 static lv_obj_t *doorlock_nfc_panel;
 static lv_obj_t *doorlock_nfc_count_label;
 static lv_timer_t *doorlock_auto_lock_timer;
+static bool doorlock_face_busy;
 static bool doorlock_nfc_busy;
 
 #define DOORLOCK_AUTO_LOCK_MS           8000
@@ -1814,6 +1919,11 @@ typedef enum {
     DOORLOCK_NFC_ACTION_ENROLL,
 } doorlock_nfc_action_t;
 
+typedef enum {
+    DOORLOCK_FACE_ACTION_UNLOCK = 0,
+    DOORLOCK_FACE_ACTION_ENROLL,
+} doorlock_face_action_t;
+
 static void doorlock_update_status(void)
 {
     if (doorlock_status_label == NULL) {
@@ -1825,6 +1935,13 @@ static void doorlock_update_status(void)
     } else {
         lv_label_set_text(doorlock_status_label, "门锁状态：已开锁");
     }
+}
+
+static void doorlock_apply_locked_state(bool locked)
+{
+    doorlock_locked = locked;
+    (void)doorlock_hw_set_locked(locked);
+    doorlock_update_status();
 }
 
 static void doorlock_set_hint(const char *text)
@@ -1854,8 +1971,7 @@ static void doorlock_auto_lock_timer_cb(lv_timer_t *timer)
     }
 
     if (!doorlock_locked) {
-        doorlock_locked = true;
-        doorlock_update_status();
+        doorlock_apply_locked_state(true);
         doorlock_set_hint("门锁已自动上锁");
     }
 }
@@ -1998,6 +2114,186 @@ static void doorlock_nfc_update_count_label(void)
     }
 }
 
+static void doorlock_face_update_count_label(void)
+{
+    uint8_t count = 0;
+    esp_err_t ret;
+
+    if (doorlock_face_count_label == NULL) {
+        return;
+    }
+
+    ret = doorlock_face_get_count(&count);
+    if (ret == ESP_OK) {
+        lv_label_set_text_fmt(doorlock_face_count_label, "已录入：%d/%d", count, DOORLOCK_FACE_MAX_TEMPLATES);
+    } else {
+        lv_label_set_text_fmt(doorlock_face_count_label, "NVS：%s", esp_err_to_name(ret));
+    }
+}
+
+static void doorlock_face_close_panel(void)
+{
+    if (doorlock_face_panel != NULL) {
+        lv_obj_del(doorlock_face_panel);
+        doorlock_face_panel = NULL;
+        doorlock_face_count_label = NULL;
+    }
+}
+
+static const char *doorlock_face_error_hint(esp_err_t ret)
+{
+    switch (ret) {
+    case ESP_ERR_NOT_FOUND:
+        return "请先录入人脸";
+    case ESP_ERR_TIMEOUT:
+        return "摄像头未取到画面";
+    case ESP_ERR_INVALID_SIZE:
+        return "摄像头图像格式异常";
+    case ESP_ERR_INVALID_RESPONSE:
+        return "画面不清晰，请靠近并保持光线";
+    case ESP_ERR_NO_MEM:
+        return "人脸库已满，请先清空";
+    default:
+        return esp_err_to_name(ret);
+    }
+}
+
+static void doorlock_face_task(void *arg)
+{
+    doorlock_face_action_t action = (doorlock_face_action_t)(intptr_t)arg;
+    char hint_text[160] = {0};
+    uint8_t slot = 0;
+    uint32_t value = 0;
+    bool unlock_success = false;
+    esp_err_t ret;
+
+    if (action == DOORLOCK_FACE_ACTION_ENROLL) {
+        ret = doorlock_face_enroll(&slot, &value);
+        if (ret == ESP_OK) {
+            snprintf(hint_text, sizeof(hint_text), "人脸录入成功：编号%d，质量%lu", slot + 1, (unsigned long)value);
+        } else {
+            snprintf(hint_text, sizeof(hint_text), "人脸录入失败：%s", doorlock_face_error_hint(ret));
+        }
+    } else {
+        ret = doorlock_face_verify(&slot, &value);
+        if (ret == ESP_OK) {
+            unlock_success = true;
+            snprintf(hint_text, sizeof(hint_text), "人脸解锁成功：编号%d 分数%lu，8秒后自动上锁",
+                     slot + 1, (unsigned long)value);
+        } else if (ret == ESP_FAIL) {
+            snprintf(hint_text, sizeof(hint_text), "人脸解锁失败：分数%lu，高于阈值%d",
+                     (unsigned long)value, DOORLOCK_FACE_MATCH_THRESHOLD);
+        } else {
+            snprintf(hint_text, sizeof(hint_text), "人脸解锁失败：%s", doorlock_face_error_hint(ret));
+        }
+    }
+
+    lvgl_port_lock(0);
+    doorlock_face_busy = false;
+    if (icon_flag == 7 && doorlock_hint_label != NULL) {
+        if (unlock_success) {
+            doorlock_apply_locked_state(false);
+            doorlock_auto_lock_start();
+        }
+        doorlock_set_hint(hint_text);
+        doorlock_face_update_count_label();
+    }
+    lvgl_port_unlock();
+
+    vTaskDelete(NULL);
+}
+
+static void doorlock_face_start_action(doorlock_face_action_t action)
+{
+    BaseType_t task_ret;
+
+    if (doorlock_face_busy) {
+        doorlock_set_hint("人脸识别正在采集，请稍等");
+        return;
+    }
+
+    doorlock_face_busy = true;
+    if (action == DOORLOCK_FACE_ACTION_ENROLL) {
+        doorlock_set_hint("人脸录入：请正对摄像头，保持1秒");
+    } else {
+        doorlock_set_hint("人脸解锁：请正对摄像头，保持1秒");
+    }
+
+    task_ret = xTaskCreatePinnedToCore(doorlock_face_task, "doorlock_face_task", 6 * 1024,
+                                       (void *)(intptr_t)action, 5, NULL, 1);
+    if (task_ret != pdPASS) {
+        doorlock_face_busy = false;
+        doorlock_set_hint("人脸识别：任务创建失败");
+    }
+}
+
+static void doorlock_face_unlock_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_face_start_action(DOORLOCK_FACE_ACTION_UNLOCK);
+}
+
+static void doorlock_face_enroll_cb(lv_event_t * e)
+{
+    (void)e;
+    doorlock_face_start_action(DOORLOCK_FACE_ACTION_ENROLL);
+}
+
+static void doorlock_face_clear_cb(lv_event_t * e)
+{
+    (void)e;
+
+    if (doorlock_face_busy) {
+        doorlock_set_hint("人脸识别正在采集，稍后再清空");
+        return;
+    }
+
+    esp_err_t ret = doorlock_face_clear();
+    if (ret == ESP_OK) {
+        doorlock_set_hint("人脸：已清空所有录入模板");
+    } else if (doorlock_hint_label != NULL) {
+        lv_label_set_text_fmt(doorlock_hint_label, "人脸清空失败：%s", esp_err_to_name(ret));
+    }
+    doorlock_face_update_count_label();
+}
+
+static void doorlock_face_close_cb(lv_event_t * e)
+{
+    (void)e;
+
+    doorlock_face_close_panel();
+    doorlock_set_hint("请选择解锁方式");
+}
+
+static lv_obj_t *doorlock_create_face_action_btn(lv_obj_t * parent, const char *symbol, const char *text,
+                                                 lv_coord_t x, lv_coord_t y, lv_color_t color, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 135, 32);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, color, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *icon = lv_label_create(btn);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xffffff), 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_width(label, 88);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 38, 0);
+
+    return btn;
+}
+
 static void btn_doorlock_back_cb(lv_event_t * e)
 {
     (void)e;
@@ -2006,6 +2302,8 @@ static void btn_doorlock_back_cb(lv_event_t * e)
     icon_in_obj = NULL;
     doorlock_status_label = NULL;
     doorlock_hint_label = NULL;
+    doorlock_face_panel = NULL;
+    doorlock_face_count_label = NULL;
     doorlock_nfc_panel = NULL;
     doorlock_nfc_count_label = NULL;
     icon_flag = 0;
@@ -2014,7 +2312,56 @@ static void btn_doorlock_back_cb(lv_event_t * e)
 static void doorlock_face_cb(lv_event_t * e)
 {
     (void)e;
-    doorlock_set_hint("人脸识别：菜单框架已创建，等待接入摄像头识别流程");
+
+    if (doorlock_nfc_panel != NULL) {
+        lv_obj_del(doorlock_nfc_panel);
+        doorlock_nfc_panel = NULL;
+        doorlock_nfc_count_label = NULL;
+    }
+
+    if (doorlock_face_panel != NULL) {
+        lv_obj_move_foreground(doorlock_face_panel);
+        doorlock_set_hint("人脸管理：选择刷脸解锁或录入人脸");
+        doorlock_face_update_count_label();
+        return;
+    }
+
+    doorlock_set_hint("人脸管理：选择刷脸解锁或录入人脸");
+
+    doorlock_face_panel = lv_obj_create(icon_in_obj);
+    lv_obj_set_size(doorlock_face_panel, 300, 126);
+    lv_obj_align(doorlock_face_panel, LV_ALIGN_TOP_MID, 0, 108);
+    lv_obj_clear_flag(doorlock_face_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(doorlock_face_panel, 8, 0);
+    lv_obj_set_style_pad_all(doorlock_face_panel, 0, 0);
+    lv_obj_set_style_bg_color(doorlock_face_panel, lv_color_hex(0xf5f7fa), 0);
+    lv_obj_set_style_border_color(doorlock_face_panel, lv_color_hex(0xd0d7de), 0);
+    lv_obj_set_style_border_width(doorlock_face_panel, 1, 0);
+    lv_obj_set_style_shadow_width(doorlock_face_panel, 0, 0);
+
+    lv_obj_t *title = lv_label_create(doorlock_face_panel);
+    lv_label_set_text(title, "人脸管理");
+    lv_obj_set_style_text_font(title, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x111827), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 6);
+
+    doorlock_face_count_label = lv_label_create(doorlock_face_panel);
+    lv_obj_set_width(doorlock_face_count_label, 150);
+    lv_obj_set_style_text_align(doorlock_face_count_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_font(doorlock_face_count_label, &font_alipuhui20, 0);
+    lv_obj_set_style_text_color(doorlock_face_count_label, lv_color_hex(0x374151), 0);
+    lv_obj_align(doorlock_face_count_label, LV_ALIGN_TOP_RIGHT, -10, 6);
+
+    doorlock_create_face_action_btn(doorlock_face_panel, LV_SYMBOL_EYE_OPEN, "刷脸解锁", 10, 36,
+                                    lv_color_hex(0x2563eb), doorlock_face_unlock_cb);
+    doorlock_create_face_action_btn(doorlock_face_panel, LV_SYMBOL_PLUS, "录入人脸", 155, 36,
+                                    lv_color_hex(0x2f855a), doorlock_face_enroll_cb);
+    doorlock_create_face_action_btn(doorlock_face_panel, LV_SYMBOL_TRASH, "清空人脸", 10, 80,
+                                    lv_color_hex(0x64748b), doorlock_face_clear_cb);
+    doorlock_create_face_action_btn(doorlock_face_panel, LV_SYMBOL_LEFT, "返回", 155, 80,
+                                    lv_color_hex(0xd97706), doorlock_face_close_cb);
+
+    doorlock_face_update_count_label();
 }
 
 static void doorlock_fingerprint_cb(lv_event_t * e)
@@ -2097,9 +2444,8 @@ done:
     doorlock_nfc_busy = false;
     if (icon_flag == 7 && doorlock_hint_label != NULL) {
         if (unlock_success) {
-            doorlock_locked = false;
+            doorlock_apply_locked_state(false);
             doorlock_auto_lock_start();
-            doorlock_update_status();
         }
         doorlock_set_hint(hint_text);
         doorlock_nfc_update_count_label();
@@ -2207,6 +2553,8 @@ static lv_obj_t *doorlock_create_nfc_action_btn(lv_obj_t * parent, const char *s
 static void doorlock_nfc_cb(lv_event_t * e)
 {
     (void)e;
+
+    doorlock_face_close_panel();
 
     if (doorlock_nfc_panel != NULL) {
         lv_obj_move_foreground(doorlock_nfc_panel);
@@ -2358,7 +2706,7 @@ static void doorlock_event_handler(lv_event_t * e)
     doorlock_create_menu_btn(icon_in_obj, LV_SYMBOL_OK, "指纹解锁", 152, lv_color_hex(0x2f855a), doorlock_fingerprint_cb);
     doorlock_create_menu_btn(icon_in_obj, LV_SYMBOL_WIFI, "NFC解锁", 192, lv_color_hex(0xd97706), doorlock_nfc_cb);
 
-    doorlock_update_status();
+    doorlock_apply_locked_state(doorlock_locked);
     icon_flag = 7;
 }
 

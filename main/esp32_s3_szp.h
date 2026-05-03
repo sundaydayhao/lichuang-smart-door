@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include "math.h"
@@ -199,6 +200,18 @@ void dvp_pwdn(uint8_t level);
 
 
 /***********************************************************/
+/****************    门锁控制输出 ↓   **********************/
+// 如需连接电控锁/继电器，请改成实际控制引脚；默认不占用任何GPIO。
+#define DOORLOCK_CTRL_GPIO             GPIO_NUM_NC
+#define DOORLOCK_UNLOCK_LEVEL          1
+
+esp_err_t doorlock_hw_init(void);
+esp_err_t doorlock_hw_set_locked(bool locked);
+/****************    门锁控制输出 ↑   **********************/
+/***********************************************************/
+
+
+/***********************************************************/
 /****************    LCD显示屏 ↓   *************************/
 #define BSP_LCD_PIXEL_CLOCK_HZ     (80 * 1000 * 1000)
 #define BSP_LCD_SPI_NUM            (SPI3_HOST)
@@ -258,7 +271,7 @@ void bsp_lvgl_start(void);
 
 #define XCLK_FREQ_HZ 24000000
 
-void bsp_camera_init(void);
+esp_err_t bsp_camera_init(void);
 void app_camera_lcd(void);
 
 #endif

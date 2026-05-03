@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include "esp32_s3_szp.h"
+#include "driver/gpio.h"
 
 static const char *TAG = "esp32_s3_szp";
 
@@ -542,6 +543,44 @@ void dvp_pwdn(uint8_t level)
 
 
 /***********************************************************/
+/****************    门锁控制输出 ↓   **********************/
+esp_err_t doorlock_hw_init(void)
+{
+    gpio_num_t gpio = DOORLOCK_CTRL_GPIO;
+
+    if (gpio == GPIO_NUM_NC) {
+        return ESP_OK;
+    }
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << (uint32_t)gpio,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "Doorlock GPIO config failed");
+    return doorlock_hw_set_locked(true);
+}
+
+esp_err_t doorlock_hw_set_locked(bool locked)
+{
+    gpio_num_t gpio = DOORLOCK_CTRL_GPIO;
+
+    if (gpio == GPIO_NUM_NC) {
+        return ESP_OK;
+    }
+
+    int unlock_level = DOORLOCK_UNLOCK_LEVEL ? 1 : 0;
+    int level = locked ? !unlock_level : unlock_level;
+    return gpio_set_level(gpio, level);
+}
+/****************    门锁控制输出 ↑   **********************/
+/***********************************************************/
+
+
+/***********************************************************/
 /****************    LCD显示屏 ↓   *************************/
 
 // 背光PWM初始化
@@ -835,7 +874,7 @@ void lcd_set_color(uint16_t color)
 static QueueHandle_t xQueueLCDFrame = NULL;
 
 // 摄像头硬件初始化
-void bsp_camera_init(void)
+esp_err_t bsp_camera_init(void)
 {
     ESP_LOGI(TAG, "Starting camera initialization...");
     
@@ -876,7 +915,8 @@ void bsp_camera_init(void)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Camera init failed with error 0x%x", err);
-        return;
+        dvp_pwdn(1);
+        return err;
     }
 
     sensor_t *s = esp_camera_sensor_get(); // 获取摄像头型号
@@ -884,6 +924,8 @@ void bsp_camera_init(void)
     if (s->id.PID == GC0308_PID) {
         s->set_hmirror(s, 1);  // 这里控制摄像头镜像 写1镜像 写0不镜像
     }
+
+    return ESP_OK;
 }
 
 int camera_lcd_flag = 0;
